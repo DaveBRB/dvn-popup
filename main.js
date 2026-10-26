@@ -160,21 +160,41 @@ function look(dx, dy) {
   player.pitch = THREE.MathUtils.clamp(player.pitch - dy * CONFIG.lookSpeed, -1.35, 1.35);
 }
 
-// Desktop: pointer lock. Browsers (Firefox on Windows especially) can report a bogus jump on the
-// first move after locking or when they re-centre the cursor, so skip the first moves after the lock
-// engages and ignore any single event bigger than a hand can produce.
+// Desktop: pointer lock. Firefox on Windows can report bogus jumps while the pointer is locked (from
+// re-centring the cursor), often a big step followed by an equal step back. A hand moves smoothly, so
+// a step much bigger than the recent ones is held back for one event: if the next event carries on in
+// the same direction it was a fast flick and both count; otherwise the held step is ignored.
 const canvas = renderer.domElement;
-const MAX_MOUSE_STEP = 300; // px in one mousemove event
-let lockedAt = 0;
+const mouse = { avg: 0, last: 0, held: null, ignored: 0, lockedAt: 0 };
+function mouseStep(dx, dy) {
+  const now = performance.now(), m = Math.hypot(dx, dy);
+  mouse.avg *= Math.exp(-(now - mouse.last) / 150); // recent step size fades when the mouse rests
+  mouse.last = now;
+  if (mouse.held) {
+    const h = mouse.held;
+    mouse.held = null;
+    if (now - h.t < 100 && dx * h.dx + dy * h.dy > 0 && m > 0.3 * h.m) {
+      look(h.dx, h.dy);
+      mouse.avg = h.m;
+    } else {
+      mouse.ignored++;
+    }
+  }
+  if (m > Math.max(60, 4 * mouse.avg)) {
+    mouse.held = { dx, dy, m, t: now };
+    return;
+  }
+  mouse.avg += (m - mouse.avg) * 0.2;
+  look(dx, dy);
+}
 document.addEventListener("mousemove", (e) => {
   if (document.pointerLockElement !== canvas) return;
-  if (performance.now() - lockedAt < 100) return;
-  if (Math.abs(e.movementX) > MAX_MOUSE_STEP || Math.abs(e.movementY) > MAX_MOUSE_STEP) return;
-  look(e.movementX, e.movementY);
+  if (performance.now() - mouse.lockedAt < 100) return; // first moves after locking can be bogus too
+  mouseStep(e.movementX, e.movementY);
 });
 document.addEventListener("pointerlockchange", () => {
   const locked = document.pointerLockElement === canvas;
-  if (locked) lockedAt = performance.now();
+  if (locked) Object.assign(mouse, { avg: 0, held: null, lockedAt: performance.now() });
   $("start").classList.toggle("hidden", locked || !ready);
 });
 
@@ -215,7 +235,7 @@ $("enter").addEventListener("click", () => {
     $("start").classList.add("hidden");
     stickEl.classList.remove("hidden");
   } else {
-    canvas.requestPointerLock();
+    canvas.requestPointerLock()?.catch?.(() => {}); // refused, e.g. clicked too soon after Esc: just click again
   }
 });
 if (isTouch) {
@@ -282,7 +302,7 @@ renderer.setAnimationLoop((now) => {
   camera.rotation.set(player.pitch, player.yaw, 0, "YXZ");
   if (DEBUG) {
     const p = player.pos; // also show Blender coordinates: (x, -z, y)
-    $("hud").textContent = `three ${p.x.toFixed(2)} ${p.y.toFixed(2)} ${p.z.toFixed(2)} | blender ${p.x.toFixed(2)} ${(-p.z).toFixed(2)} ${p.y.toFixed(2)}`;
+    $("hud").textContent = `three ${p.x.toFixed(2)} ${p.y.toFixed(2)} ${p.z.toFixed(2)} | blender ${p.x.toFixed(2)} ${(-p.z).toFixed(2)} ${p.y.toFixed(2)} | mouse jumps ignored ${mouse.ignored}`;
   }
   renderer.render(scene, camera);
 });
@@ -303,4 +323,4 @@ renderer.setAnimationLoop((now) => {
 })();
 
 // handy for testing in the console
-window.popup = { player, markers, walls, floors, get doorBlocker() { return doorBlocker; }, CONFIG, world, camera };
+window.popup = { player, markers, walls, floors, get doorBlocker() { return doorBlocker; }, CONFIG, world, camera, mouse };
