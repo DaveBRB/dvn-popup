@@ -1,0 +1,6 @@
+*.blend
+*.blend1
+*.ply
+*.splat
+*.spz
+node_modules/
