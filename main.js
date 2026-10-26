@@ -160,13 +160,21 @@ function look(dx, dy) {
   player.pitch = THREE.MathUtils.clamp(player.pitch - dy * CONFIG.lookSpeed, -1.35, 1.35);
 }
 
-// Desktop: pointer lock
+// Desktop: pointer lock. Browsers (Firefox on Windows especially) can report a bogus jump on the
+// first move after locking or when they re-centre the cursor, so skip the first moves after the lock
+// engages and ignore any single event bigger than a hand can produce.
 const canvas = renderer.domElement;
+const MAX_MOUSE_STEP = 300; // px in one mousemove event
+let lockedAt = 0;
 document.addEventListener("mousemove", (e) => {
-  if (document.pointerLockElement === canvas) look(e.movementX, e.movementY);
+  if (document.pointerLockElement !== canvas) return;
+  if (performance.now() - lockedAt < 100) return;
+  if (Math.abs(e.movementX) > MAX_MOUSE_STEP || Math.abs(e.movementY) > MAX_MOUSE_STEP) return;
+  look(e.movementX, e.movementY);
 });
 document.addEventListener("pointerlockchange", () => {
   const locked = document.pointerLockElement === canvas;
+  if (locked) lockedAt = performance.now();
   $("start").classList.toggle("hidden", locked || !ready);
 });
 
@@ -181,7 +189,9 @@ canvas.addEventListener("pointermove", (e) => {
   look((e.clientX - lastX) * 1.6, (e.clientY - lastY) * 1.6);
   lastX = e.clientX; lastY = e.clientY;
 });
-canvas.addEventListener("pointerup", (e) => { if (e.pointerId === lookId) lookId = null; });
+const endLook = (e) => { if (e.pointerId === lookId) lookId = null; };
+canvas.addEventListener("pointerup", endLook);
+canvas.addEventListener("pointercancel", endLook);
 
 // Touch: virtual joystick
 const stickEl = $("stick"), knob = stickEl.querySelector("i");
