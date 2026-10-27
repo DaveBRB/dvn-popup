@@ -28,13 +28,12 @@
     #stick > i { position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px;
                  border-radius: 50%; background: rgba(244,239,230,.75); }
   </style>
-  <!-- Pinned versions. Spark 2.4.0 needs three >= 0.180.0 -->
+  <!-- Pinned versions -->
   <script type="importmap">
   {
     "imports": {
       "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
       "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/",
-      "@sparkjsdev/spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.4.0/dist/spark.module.js",
       "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.9.16/build/index.module.js"
     }
   }
@@ -54,8 +53,8 @@
     <h1>DRIES VAN NOTEN</h1>
     <div class="sub">Jardin des Tuileries · Pop-up</div>
     <button id="enter">Walk in the garden</button>
-    <div class="keys" id="help-desktop">W A S D or arrows to walk · mouse to look · Shift to run · Esc to pause</div>
-    <div class="keys hidden" id="help-touch">Left thumb: walk · drag anywhere else: look</div>
+    <div class="keys" id="help-desktop">W A S D or arrows to walk · mouse to look · Shift to run · click the water · Esc to pause</div>
+    <div class="keys hidden" id="help-touch">Left thumb: walk · drag anywhere else: look · tap the water</div>
     <div class="credit">Concept project by David Berrebi — not affiliated with Dries Van Noten</div>
   </div>
 

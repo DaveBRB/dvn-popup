@@ -1,0 +1,73 @@
+{
+ "sun": {
+  "direction": [
+   0.6137183308601379,
+   -0.6287770867347717,
+   -0.4774821400642395
+  ],
+  "color": [
+   1.0,
+   0.8399999737739563,
+   0.6399999856948853
+  ],
+  "blender_energy": 1.649999976158142,
+  "angle_deg": 0.7999999938029067
+ },
+ "water": {
+  "center": [
+   0.0,
+   0.025000005960464478,
+   10.62530517578125
+  ],
+  "radius": 6.74800112055988,
+  "level": 0.025000005960464478
+ },
+ "entrance_light": {
+  "position": [
+   0.0,
+   3.200000047683716,
+   -1.2999999523162842
+  ],
+  "color": [
+   1.0,
+   0.47999998927116394,
+   0.1599999964237213
+  ],
+  "blender_energy_w": 130.0,
+  "size": 2.0,
+  "direction": [
+   0.0,
+   -1.0,
+   -0.0
+  ]
+ },
+ "ground": {
+  "material": "Tuileries | pale compacted limestone gravel",
+  "tint_linear": [
+   2.1500000953674316,
+   2.059999942779541,
+   1.899999976158142
+  ],
+  "leaf_texture": "textures/leaf_scattered_gravel.jpg",
+  "noise_scale": 0.14000000059604645,
+  "noise_detail": 2.0,
+  "noise_math": {
+   "op": "MULTIPLY",
+   "b": 0.15000000596046448
+  },
+  "object_origin_three": [
+   0.0,
+   -0.296999990940094,
+   -0.0
+  ],
+  "object_scale": [
+   1.0,
+   1.0,
+   1.0
+  ]
+ },
+ "view": {
+  "blender_view_transform": "AgX",
+  "look": "AgX - Medium High Contrast"
+ }
+}
