@@ -2,8 +2,10 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { computeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
 import { createWater } from "./water.js";
+import { createAmbience } from "./ambient.js";
 
 THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
 THREE.Mesh.prototype.raycast = acceleratedRaycast;
@@ -11,10 +13,13 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 // ---------------------------------------------------------------- settings
 const CONFIG = {
   sceneUrl: "./assets/scene.glb",          // exported by make_web_scene.py, compressed with gltf-transform
-  sceneInfoUrl: "./assets/scene-info.json", // sun, water and entrance light from the .blend
+  sceneInfoUrl: "./assets/scene-info.json", // sun, water, entrance light and tree positions from the .blend
+  treesUrl: "./assets/trees.glb",           // autumn tree variants made with EZ-Tree (treegen/ in the source folder)
   leafGravelUrl: "./assets/textures/leaf_scattered_gravel.jpg",
   colliderUrl: "./assets/collision.glb",
   skyUrl: "./assets/sky.jpg",               // the world panorama: visible sky and ambient light
+  birdsUrl: "./assets/birds.mp3",           // bird calls: CC0 recordings packed back to back (see CREDITS.md)
+  birdClipsUrl: "./assets/birds.json",      // where each call sits in birds.mp3, and which species it is
   exposure: 0.85,
   sunIntensity: 4.2,
   envIntensity: 0.9,
@@ -26,6 +31,12 @@ const CONFIG = {
   gravity: 9.81,
   lookSpeed: 0.0022, // radians per pixel
   doorRadius: 1.8,   // how close to DOOR_ZONE before the "enter" prompt shows
+  walkBounds: [-28.6, 28.6, -30, 38.5], // the park edge colliders (Blender x and y): trees inside get trunk colliders
+  birds: 16,         // birds singing in the trees
+  roads: [           // traffic beyond the park (three.js z): the busy street behind the shop, a quieter one past the front
+    { z: -72, xs: [-60, 0, 60], level: 1 },
+    { z: 78, xs: [-50, 50], level: 0.55 },
+  ],
 };
 const params = new URLSearchParams(location.search);
 const DEBUG = params.has("debug");
@@ -82,24 +93,105 @@ async function loadScene(info) {
     if (!o.isMesh) return;
     o.castShadow = o.receiveShadow = true;
     const m = o.material;
-    if (m.name.startsWith("Tuileries trees")) fixFoliage(o, m);
-    else if (m.name.startsWith("Tuileries | pale compacted limestone gravel")) fixGravel(m, info.ground, leafGravel);
+    if (m.name.startsWith("Tuileries | pale compacted limestone gravel")) fixGravel(m, info.ground, leafGravel);
   });
   scene.add(gltf.scene);
 }
 
-// Leaves: alpha-tested cards, and each tree slightly differently coloured (Blender varies the hue per tree)
-function fixFoliage(mesh, m) {
-  Object.assign(m, { transparent: false, alphaTest: 0.2, alphaToCoverage: true, side: THREE.DoubleSide, depthWrite: true });
-  // thin leaves let sunlight through (Blender gives them a little subsurface): a faint glow of their own colour
-  m.emissiveMap = m.map;
-  m.emissive.setRGB(0.35, 0.3, 0.2);
-  m.color.multiplyScalar(1.15);
-  if (!mesh.isInstancedMesh) return;
-  const tints = [[1, 1, 1], [1.1, 0.9, 0.75], [0.95, 1.03, 0.82], [1.12, 0.82, 0.62], [1.04, 0.97, 0.88]];
-  const c = new THREE.Color();
-  for (let i = 0; i < mesh.count; i++) mesh.setColorAt(i, c.setRGB(...tints[(i * 7 + 3) % tints.length]));
-  mesh.instanceColor.needsUpdate = true;
+// ---------------------------------------------------------------- trees
+// The .blend's avenue positions plus extra rows around the park (Blender x, y in metres), each planted with
+// one of the generated autumn trees. Every tree of a variant is one instanced draw call.
+function treeSpots(info) {
+  const kinds = ["TREE_ASH_A", "TREE_ASH_B", "TREE_ASH_A", "TREE_OAK_A", "TREE_ASH_B"];
+  const spots = info.trees.map((t, i) => ({ x: t.position[0], z: t.position[2], yaw: t.rotation_y, variant: kinds[i % kinds.length] }));
+  const add = (bx, by, variant = "TREE_FAR") => spots.push({ x: bx, z: -by, yaw: 0, variant });
+  for (const x of [-36, 36]) for (const y of [-27, -15, -3, 9, 21, 33, 39]) add(x, y, "TREE_ASH_B");
+  for (const x of [-42, 42]) for (let y = -33; y <= 45; y += 6) add(x, y);
+  for (let x = -36; x <= 36; x += 6) { add(x, 44); add(x, -36); }
+  let r = 9;
+  const rand = () => ((r = (r * 16807) % 2147483647) / 2147483647);
+  for (const s of spots) {               // a little irregularity, as in a real avenue
+    s.x += (rand() - 0.5) * 0.6; s.z += (rand() - 0.5) * 0.6;
+    s.yaw += rand() * Math.PI * 2; s.scale = 0.9 + rand() * 0.22; s.tint = rand();
+  }
+  return spots;
+}
+
+const wind = { value: 0 };
+// branches and leaves sway gently, more towards the crown; the trunk stays put. Applied after the instance
+// transform so heights are in metres (the tree geometry itself is stored compressed).
+function addWind(m) {
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = wind;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nuniform float uTime;")
+      .replace("#include <project_vertex>", `
+        vec4 mvPosition = vec4(transformed, 1.0);
+        #ifdef USE_INSTANCING
+          mvPosition = instanceMatrix * mvPosition;
+          float ph = dot(instanceMatrix[3].xz, vec2(0.13, 0.17));
+        #else
+          float ph = 0.0;
+        #endif
+        float sway = smoothstep(2.5, 12.0, mvPosition.y);
+        mvPosition.x += sway * (0.09 * sin(uTime * 0.8 + ph) + 0.025 * sin(uTime * 2.1 + mvPosition.y * 0.7 + ph));
+        mvPosition.z += sway * (0.06 * sin(uTime * 0.6 + ph * 1.3) + 0.02 * sin(uTime * 2.7 + mvPosition.x * 0.9));
+        #ifdef USE_COLOR
+          mvPosition.xyz += sway * 0.015 * sin(uTime * 7.0 + dot(mvPosition.xyz, vec3(9.0, 7.0, 11.0)));  // leaf flutter
+        #endif
+        mvPosition = modelViewMatrix * mvPosition;
+        gl_Position = projectionMatrix * mvPosition;`);
+  };
+}
+
+async function plantTrees(info) {
+  const gltf = await new GLTFLoader().setMeshoptDecoder(MeshoptDecoder).loadAsync(CONFIG.treesUrl);
+  gltf.scene.updateMatrixWorld(true);
+  const spots = treeSpots(info), [x0, x1, y0, y1] = CONFIG.walkBounds;
+  const tints = [[1, 1, 1], [1.06, 0.96, 0.86], [0.96, 1.0, 0.9], [1.1, 1.0, 0.88], [0.92, 0.9, 0.86]];
+  const trunks = [], m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0), c = new THREE.Color();
+  for (const group of gltf.scene.children) {
+    const mine = spots.filter((s) => s.variant === group.name);
+    if (!mine.length) continue;
+    group.traverse((o) => {
+      if (!o.isMesh) return;
+      const leaves = o.material.vertexColors;
+      if (leaves) {   // alpha-tested leaf cards; Lambert shading costs a fraction of PBR for all that overdraw
+        const m = o.material;
+        o.material = new THREE.MeshLambertMaterial({
+          name: m.name, map: m.map, vertexColors: true, side: THREE.DoubleSide, alphaTest: 0.4, alphaToCoverage: true,
+          emissiveMap: m.map, emissive: new THREE.Color(0.22, 0.19, 0.13), // thin leaves let a little sunlight through
+        });
+      } else {
+        o.material.color.multiplyScalar(1.4);   // the bark reads too dark under the low sun
+      }
+      // the node transform also undoes the compressed (quantized) positions, so keep it in each instance matrix
+      const mesh = new THREE.InstancedMesh(o.geometry, o.material, mine.length);
+      mesh.name = o.name;
+      mesh.castShadow = mesh.receiveShadow = true;
+      mine.forEach((s, i) => {
+        m4.compose(new THREE.Vector3(s.x, 0, s.z), q.setFromAxisAngle(up, s.yaw), new THREE.Vector3(s.scale, s.scale, s.scale));
+        mesh.setMatrixAt(i, m4.multiply(o.matrixWorld));
+        if (leaves) mesh.setColorAt(i, c.setRGB(...tints[Math.floor(s.tint * tints.length)]));
+      });
+      addWind(o.material);
+      mesh.computeBoundingSphere();
+      scene.add(mesh);
+    });
+    const r = group.userData.trunkRadius ?? 0.35;
+    for (const s of mine) {
+      if (s.x > x0 && s.x < x1 && -s.z > y0 && -s.z < y1) trunks.push(new THREE.CylinderGeometry(r * s.scale + 0.03, r * s.scale + 0.03, 4, 10).translate(s.x, 1.5, s.z));
+    }
+  }
+  if (trunks.length) {   // trunks inside the walkable area are solid
+    const geom = mergeGeometries(trunks);
+    geom.computeBoundsTree();
+    const mesh = new THREE.Mesh(geom, debugMat);
+    mesh.name = "COL_TREE_TRUNKS";
+    walls.push(mesh);
+    if (DEBUG) scene.add(mesh);
+  }
+  return spots;
 }
 
 // Gravel: Blender brightens the gravel texture (a tint above 1, which glTF can't store) and blends in a
@@ -359,6 +451,8 @@ stickEl.addEventListener("pointercancel", resetStick);
 
 $("prompt").addEventListener("click", () => nearDoor && enterStore());
 $("enter").addEventListener("click", () => {
+  startSound();
+  $("sound").classList.remove("hidden");
   if (isTouch) {
     $("start").classList.add("hidden");
     stickEl.classList.remove("hidden");
@@ -374,7 +468,57 @@ if (isTouch) {
   $("help-touch").classList.remove("hidden");
   $("prompt").textContent = "Tap here to enter the store";
 } else if (dragLook) {
-  $("help-desktop").textContent = "W A S D or arrows to walk · drag to look · Shift to run · click the water · Esc to pause";
+  $("help-desktop").textContent = "W A S D or arrows to walk · drag to look · Shift to run · click the water · M sound · Esc to pause";
+}
+
+// ---------------------------------------------------------------- sound
+// Starts with the "Walk in the garden" click (browsers only allow audio after a user gesture).
+const sound = { ctx: null, amb: null, on: true, spots: [], birdFiles: null };
+try { sound.on = localStorage.getItem("dvn-sound") !== "off"; } catch {}
+// the bird calls download once the scene is in, and are decoded when the audio starts
+function loadBirds() {
+  return (sound.birdFiles ||= Promise.all([fetch(CONFIG.birdsUrl).then((r) => r.arrayBuffer()), fetch(CONFIG.birdClipsUrl).then((r) => r.json())])
+    .catch((e) => console.warn("bird sounds unavailable:", e)));
+}
+function startSound() {
+  if (!sound.ctx) {
+    sound.ctx = new AudioContext();
+    let r = 3;
+    const rand = () => ((r = (r * 16807) % 2147483647) / 2147483647);
+    const birdSpots = Array.from({ length: CONFIG.birds }, () => {
+      const t = sound.spots[Math.floor(rand() * sound.spots.length)];
+      return { x: t.x + (rand() - 0.5) * 3, y: (6.5 + rand() * 3) * t.scale, z: t.z + (rand() - 0.5) * 3 };
+    });
+    sound.amb = createAmbience(sound.ctx, { birdSpots, roads: CONFIG.roads.map((r) => ({ ...r })) });
+    loadBirds().then(async (f) => f && sound.amb.setBirds(await sound.ctx.decodeAudioData(f[0]), f[1].clips))
+      .catch((e) => console.warn("bird sounds unavailable:", e));
+    setInterval(() => sound.ctx.state === "running" && sound.amb.scheduleUntil(sound.ctx.currentTime + 2), 500);
+  }
+  setSound(sound.on);
+}
+function setSound(on) {
+  sound.on = on;
+  try { localStorage.setItem("dvn-sound", on ? "on" : "off"); } catch {}
+  $("sound").textContent = on ? "Sound on" : "Sound off";
+  $("sound").setAttribute("aria-pressed", String(on));
+  if (!sound.ctx) return;
+  if (on && !document.hidden) sound.ctx.resume(); else sound.ctx.suspend();
+}
+$("sound").addEventListener("click", () => { if (!sound.ctx) startSound(); setSound(!sound.on); });
+addEventListener("keydown", (e) => { if (e.code === "KeyM" && sound.ctx) setSound(!sound.on); });
+document.addEventListener("visibilitychange", () => sound.ctx && setSound(sound.on));
+setSound(sound.on);
+
+// ---------------------------------------------------------------- adaptive resolution
+// Weaker GPUs: drop the render resolution when frames get slow, raise it again when there is headroom.
+const quality = { max: renderer.getPixelRatio(), frames: 0, time: 0 };
+function adaptResolution(dt) {
+  quality.frames++; quality.time += dt;
+  if (quality.time < 2) return;
+  const fps = quality.frames / quality.time, pr = renderer.getPixelRatio();
+  quality.frames = quality.time = 0;
+  const next = fps < 40 ? Math.max(0.6, pr * 0.85) : fps > 57 ? Math.min(quality.max, pr * 1.1) : pr;
+  if (Math.abs(next - pr) > 0.01) { renderer.setPixelRatio(next); water?.resize(); }
 }
 
 // ---------------------------------------------------------------- the store door
@@ -433,6 +577,8 @@ renderer.setAnimationLoop((now) => {
     for (let i = 0; i < n; i++) step(dt / n);
     updateDoor();
     water?.update(dt);
+    wind.value += dt;
+    adaptResolution(dt);
   }
   if (!view.free) {
     camera.position.set(player.pos.x, player.pos.y + CONFIG.eyeHeight, player.pos.z);
@@ -442,6 +588,7 @@ renderer.setAnimationLoop((now) => {
     const p = player.pos; // also show Blender coordinates: (x, -z, y)
     $("hud").textContent = `three ${p.x.toFixed(2)} ${p.y.toFixed(2)} ${p.z.toFixed(2)} | blender ${p.x.toFixed(2)} ${(-p.z).toFixed(2)} ${p.y.toFixed(2)} | ${fps.toFixed(0)} fps | ${dragLook ? "drag look" : `mouse jumps ignored ${mouse.ignored}`}`;
   }
+  if (sound.amb && sound.on) sound.amb.setListener(camera);
   renderer.render(scene, camera);
 });
 
@@ -450,7 +597,9 @@ let lights = null;
 (async () => {
   try {
     const info = await (await fetch(CONFIG.sceneInfoUrl)).json();
-    await Promise.all([loadScene(info), loadSky(CONFIG.skyUrl), loadColliders(CONFIG.colliderUrl)]);
+    const [, spots] = await Promise.all([loadScene(info), plantTrees(info), loadSky(CONFIG.skyUrl), loadColliders(CONFIG.colliderUrl)]);
+    sound.spots = spots;
+    loadBirds();
     lights = addLights(info);
     const w = info.water;
     water = createWater({
@@ -472,4 +621,4 @@ let lights = null;
 })();
 
 // handy for testing in the console
-window.popup = { player, markers, walls, floors, get doorBlocker() { return doorBlocker; }, CONFIG, camera, mouse, scene, renderer, view, get water() { return water; }, get lights() { return lights; }, dragLook };
+window.popup = { player, markers, walls, floors, get doorBlocker() { return doorBlocker; }, CONFIG, camera, mouse, scene, renderer, view, get water() { return water; }, get lights() { return lights; }, dragLook, sound, quality };
